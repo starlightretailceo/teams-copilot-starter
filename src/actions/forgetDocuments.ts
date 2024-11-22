@@ -8,6 +8,7 @@ import { VectraDataSource } from "../dataSources/vectraDataSource";
 import { UserHelper } from "../helpers/userHelper";
 import { Utils } from "../helpers/utils";
 import { ActionsHelper } from "../helpers/actionsHelper";
+import { EventNames } from "../types/eventNames";
 
 /**
  * Forgets the uploaded documents and clears the document index.
@@ -22,6 +23,10 @@ export async function forgetDocuments(
   state: ApplicationTurnState
 ): Promise<string> {
   const logger = logging.getLogger("bot.TeamsAI");
+  logger.trackEvent(
+    EventNames.ForgetDocuments,
+    Utils.GetUserProperties(context.activity)
+  );
   const env = container.resolve<Env>(Env);
 
   // Get the user's information
@@ -41,7 +46,7 @@ export async function forgetDocuments(
     const vectraDS = new VectraDataSource({
       name: env.data.WEBDATA_SOURCE_NAME,
       embeddings: ActionsHelper.getEmbeddingsOptions(),
-      indexFolder: env.data.VECTRA_INDEX_PATH,
+      indexFolder: env.data.VECTRA_INDEX_PATH ?? "",
     });
 
     // delete the uploaded documents from the vectra index

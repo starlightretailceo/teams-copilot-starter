@@ -1,3 +1,5 @@
+import { container } from "tsyringe";
+import { Env } from "../env";
 import { ActionPlanner } from "@microsoft/teams-ai";
 import { TurnContext } from "botbuilder";
 import { ApplicationTurnState, CopilotRoles } from "../models/aiTypes";
@@ -10,6 +12,9 @@ import { AxiosError } from "axios";
 
 import { logging } from "../telemetry/loggerManager";
 import { Utils } from "../helpers/utils";
+import { ActionsHelper } from "../helpers/actionsHelper";
+import { MetricNames } from "../types/metricNames";
+import { EventNames } from "../types/eventNames";
 
 // Get an instance of the Logger singleton object
 const logger = logging.getLogger("bot.TeamsAI");
@@ -53,30 +58,59 @@ export class ChatGPTSkill extends BaseAISkill {
   public override async run(input: string): Promise<any> {
     logger.debug("Running Chat GPT skill.");
     logger.debug(`Input: ${input}`);
-
-    const maxTurnsToRemember = await Utils.MaxTurnsToRemember();
-    // get the conversation chat history from the state
-    const cachedHistory = CacheHelper.getChatHistory(
-      this.state,
-      maxTurnsToRemember
+    logger.trackEvent(
+      EventNames.ChatGPTSkill,
+      Utils.GetUserProperties(this.context.activity)
     );
 
-    // add the user's prompt to the conversation history
-    const chatHistory = [
-      ...cachedHistory,
-      {
-        role: CopilotRoles.user,
-        content: input,
-      },
-    ];
-    this.state.temp.input = JSON.stringify(chatHistory);
+    if (this.state.temp.useCache) {
+      const maxTurnsToRemember = await Utils.MaxTurnsToRemember();
+      // get the conversation chat history from the state
+      const cachedHistory = CacheHelper.getChatHistory(
+        this.state,
+        maxTurnsToRemember
+      );
+
+      // add the user's prompt to the conversation history
+      const chatHistory = [
+        ...cachedHistory,
+        {
+          role: CopilotRoles.user,
+          content: input,
+        },
+      ];
+      this.state.temp.input = JSON.stringify(chatHistory);
+    } else {
+      this.state.temp.input = input;
+    }
+
+    // Get an instance of the Env singleton object
+    const env = container.resolve(Env);
+
+    // If the user has indexed the Azure AI Search RAG data source, add it to the prompt
+    if (
+      process.env.AZURE_SEARCH_ENDPOINT &&
+      env.data.AZURE_SEARCH_ENDPOINT &&
+      env.data.AZURE_SEARCH_KEY &&
+      env.data.AZURE_SEARCH_INDEX_NAME &&
+      env.data.AZURE_SEARCH_SOURCE_NAME
+    ) {
+      this.planner.prompts.addDataSource(
+        await ActionsHelper.addAzureAISearchDataSource(
+          AIPrompts.ChatGPT,
+          this.planner
+        )
+      );
+    }
 
     try {
+      const startTime = Date.now();
       const response = await this.planner.completePrompt(
         this.context,
         this.state,
         this.promptTemplate!
       );
+      logger.trackDurationMetric(startTime, MetricNames.ChatGPTSkillPromptTime);
 
       if (response.status !== "success") {
         if (response.error?.name === "AxiosError") {
@@ -110,7 +144,13 @@ export class ChatGPTSkill extends BaseAISkill {
         return undefined;
       }
 
-      return Utils.extractJsonResponse(response.message?.content);
+      if (!response.message) {
+        logger.error("Chat GPT operation failed. No response received.");
+        await this.context.sendActivity(responses.openAIRateLimited());
+        return undefined;
+      }
+
+      return response.message;
     } catch (error: any) {
       if (error.name === "AxiosError" && error.message.includes("429")) {
         await this.context.sendActivity(responses.openAIRateLimited());

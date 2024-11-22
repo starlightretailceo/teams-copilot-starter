@@ -12,28 +12,27 @@ import {
   ApplicationBuilder,
   FeedbackLoopData,
   AuthError,
+  PredictedSayCommand,
+  AI,
 } from "@microsoft/teams-ai";
 import {
   ActivityTypes,
-  TaskModuleTaskInfo,
   TurnContext,
   Storage,
   Activity,
-  CardFactory
+  CardFactory,
+  TeamsInfo,
+  ConversationReference,
+  MemoryStorage,
 } from "botbuilder";
-import { ApplicationTurnState, ChatParameters, TData } from "../models/aiTypes";
+import { ApplicationTurnState, ChatParameters, CopilotRoles } from "../models/aiTypes";
 import debug from "debug";
 import { Utils } from "../helpers/utils";
-import EntityInfo from "../models/entityInfo";
 import * as responses from "../resources/responses";
 import { logging } from "../telemetry/loggerManager";
 import { AIPrompts } from "../prompts/aiPromptTypes";
 import { container } from "tsyringe";
-import CompanyInfo from "../models/companyInfo";
 import { Logger } from "../telemetry/logger";
-import {
-  EntityRecognitionSkill
-} from "../skills";
 import { CacheHelper } from "../helpers/cacheHelper";
 import { Env } from "../env";
 import { LocalDocumentIndex } from "vectra";
@@ -42,19 +41,19 @@ import { AppInsightLogger } from "../telemetry/appInsightLogger";
 import { BlobsStorageLeaseManager } from "../helpers/blobsStorageLeaseManager";
 import { BotMessageKeywords } from "../models/botMessageKeywords";
 import { RestError } from "@azure/storage-blob";
+import adapter from "../adapter";
 import * as actionNames from "../actions/actionNames";
 import { 
   debugOn,
   debugOff,
-  getCompanyInfo,
-  getCompanyDetails,
+  getSemanticInfo,
   chatWithDocument,
   forgetDocuments,
   flaggedInputAction,
   flaggedOutputAction,
   unknownAction,
   webRetrieval,
-  getCompanyStockQuote,
+  formatActionMessage,
   resetIndex
 } from "../actions";
 import * as functionNames from "../functions/functionNames";
@@ -66,31 +65,14 @@ import {
   getUserState,
   incrementFileIndex
 } from "../functions";
-import * as acActionNames from "../adaptiveCards/actions/adaptiveCardActionNames";
-import {
-  suggestedPrompt,
-  otherCompany
-} from "../adaptiveCards/actions";
-import * as commandNames from "../messageExtensions/commandNames";
-import {
-  searchCmd, selectItem
-} from "../messageExtensions";
 import { UserHelper } from "../helpers/userHelper";
-import { ActionsHelper } from "../helpers/actionsHelper";
+import * as commandNames from "../messageExtensions/commandNames";
+import { searchCmd } from "../messageExtensions";
+import { BlobsStorage } from "botbuilder-azure-blobs";
+import { MetricNames } from "../types/metricNames";
+import { EventNames } from "../types/eventNames";
 
 
-// Configure logging
-const consoleLogger = new ConsoleLogger();
-const appInsightLogger = new AppInsightLogger();
-
-logging
-  .configure({
-    minLevels: {
-      "": "trace",
-    },
-  })
-  .registerLogger(consoleLogger)
-  .registerLogger(appInsightLogger);
 
 
 // Define the TeamsAI class that extends the Application class
@@ -100,8 +82,7 @@ export class TeamsAI {
   private readonly error: debug.Debugger;
   private readonly planner: ActionPlanner<ApplicationTurnState>;
   private readonly env: Env;
-  private readonly LocalVectraIndex: LocalDocumentIndex;
-  private readonly stateStorageManager: BlobsStorageLeaseManager;
+  private readonly stateStorageManager: BlobsStorageLeaseManager | undefined;
   private readonly authConnectionName = "graph";
 
   // The name of the channel for M365 Message Extensions
@@ -114,16 +95,46 @@ export class TeamsAI {
   public static readonly BeforeTurn = "beforeTurn";
   public static readonly AfterTurn = "afterTurn";
 
-  private configureAI(botId: string, adapter: TeamsAdapter, storage: Storage, planner: ActionPlanner<ApplicationTurnState>): Application<ApplicationTurnState> {
+  // Handoff url template
+  public static HandoffUrl = "https://teams.microsoft.com/l/chat/0/0?users=28:${botId}&continuation=${continuation}";
+
+  public static ConversationReferences: Record<string, Partial<ConversationReference>> = {};
+
+
+  private configureLogging(): Logger {
+    // Configure logging
+    const consoleLogger = new ConsoleLogger();
+    const appInsightLogger = new AppInsightLogger();
+
+    logging
+      .configure({
+        minLevels: {
+          "": "trace",
+        },
+      })
+      .registerLogger(consoleLogger)
+      .registerLogger(appInsightLogger);
+
+    return logging.getLogger("bot.TeamsAI");
+  }
+
+  /**
+   * Configure the AI application for the Teams environment
+   * @param botId - The bot id to use for the AI.
+   * @param storage - The storage to use for the conversation store.
+   * @param planner - The planner to use for the AI.
+   * @returns The configured AI application.
+   */
+  private configureAI(botId: string, storage: Storage, planner: ActionPlanner<ApplicationTurnState>): Application<ApplicationTurnState> {
     const ai = new ApplicationBuilder<ApplicationTurnState>()
       .withStorage(storage)
-      .withLongRunningMessages(adapter, botId)
+      .withLongRunningMessages(adapter as TeamsAdapter, botId)
       .withAIOptions({
         planner: planner,
         allow_looping: false, // set false for sequence augmentation to prevent sending the return value of the last action to the AI.run method
         enable_feedback_loop: true, // enables the user feedback functionality
       })
-      .withAuthentication(adapter, {
+      .withAuthentication(adapter as TeamsAdapter, {
         settings: {
             graph: {
                 scopes: [`api://botid-${this.env.data.BOT_ID}/access_as_user`],
@@ -143,6 +154,24 @@ export class TeamsAI {
       .build();
     return ai;
   };
+
+  /**
+   * Configure the AI application for the test tool environment
+   * @param storage - The storage to use for the conversation store.
+   * @param planner - The planner to use for the AI.
+   * @returns The configured AI application.
+   */
+  private configureAIForTestTool(storage: Storage, planner: ActionPlanner<ApplicationTurnState>): Application<ApplicationTurnState> {
+      const ai = new ApplicationBuilder<ApplicationTurnState>()
+      .withStorage(storage)
+      .withAIOptions({
+        planner: planner,
+        allow_looping: false, // set false for sequence augmentation to prevent sending the return value of the last action to the AI.run method
+        enable_feedback_loop: true, // enables the user feedback functionality
+      })
+      .build();
+    return ai;
+  };
   
   /**
    * The TeamsAI constructor.
@@ -152,18 +181,33 @@ export class TeamsAI {
    * @remarks
    */
   constructor(
-    botAppId: string,
-    adapter: TeamsAdapter,
     storage: Storage,
-    planner: ActionPlanner<ApplicationTurnState>
+    planner: ActionPlanner<ApplicationTurnState>,
+    conversationReferences?: any
   ) {
     // Create the environment variables
     this.env = container.resolve<Env>(Env);
 
-    // Create the AI application
-    this.app = this.configureAI(botAppId, adapter, storage, planner);    
+    if (this.env.environment === "testtool") {
+      // Create the AI application for the test tool environment
+      this.app = this.configureAIForTestTool(new MemoryStorage(), planner);    
+    } else {
+      // Create the AI application for the Teams environment
+
+      // Set up the handoff URL
+      TeamsAI.HandoffUrl = TeamsAI.HandoffUrl.replace("${botId}", this.env.data.BOT_ID);
+      
+      // Create the AI application
+      this.app = this.configureAI(this.env.data.BOT_ID, storage, planner);    
+    }
+
+    TeamsAI.ConversationReferences = conversationReferences;
+
     this.planner = planner;
-    this.logger = logging.getLogger("bot.TeamsAI");
+
+    // Configure the logger
+    this.logger = this.configureLogging();
+
     // Register this.logger singleton, if it is not registered
     if (!container.isRegistered(Logger))
       container.register(Logger, { useValue: this.logger });
@@ -173,74 +217,71 @@ export class TeamsAI {
     this.error.log = console.log.bind(this.logger);
     this.error.enabled = true;
 
-    // Resolve the Environment dependency injection
-    this.env = container.resolve<Env>(Env);
-    // Resolve the BlobsStorageLeaseManager dependency injection
-    this.stateStorageManager = container.resolve<BlobsStorageLeaseManager>(BlobsStorageLeaseManager);
-
-    // Create a local Vectra index
-    this.LocalVectraIndex = new LocalDocumentIndex({
-      folderPath: this.env.data.VECTRA_INDEX_PATH!,
-    });
+    if (storage instanceof BlobsStorage) {
+      // Resolve the BlobsStorageLeaseManager dependency injection
+      this.stateStorageManager = container.resolve<BlobsStorageLeaseManager>(BlobsStorageLeaseManager);
+    }
 
     /**********************************************************************
      * FUNCTION:Handlers for authentication
      **********************************************************************/
-    this.app.authentication.get(this.authConnectionName).onUserSignInSuccess(async (context: TurnContext, state: ApplicationTurnState) => {
-      // Successfully logged in
-      const card = {
-        type: "AdaptiveCard",
-        version: "1.0",
-        body: [
-          {
-            type: "TextBlock",
-            text: "We needed to sign you in.",
-            style: "heading",
-            size: "ExtraLarge",
-            color: "Good"
-          },
-          {
-            type: "TextBlock",
-            text: `Your are now signed in as: ${context.activity.from.name}`
-          },
-        ],
-      };
-    
-      const adaptiveCard = CardFactory.adaptiveCard(card);
-      await context.sendActivity({ attachments: [adaptiveCard] }); 
+    if (this.env.environment !== "testtool") {
+      this.app.authentication.get(this.authConnectionName).onUserSignInSuccess(async (context: TurnContext, state: ApplicationTurnState) => {
+        // Successfully logged in
+        const card = {
+          type: "AdaptiveCard",
+          version: "1.0",
+          body: [
+            {
+              type: "TextBlock",
+              text: "We needed to sign you in.",
+              style: "heading",
+              size: "ExtraLarge",
+              color: "Good"
+            },
+            {
+              type: "TextBlock",
+              text: `Your are now signed in as: ${context.activity.from.name}`
+            },
+          ],
+        };
       
-      // Echo back users request
-      if (context.activity.channelData.source.name === "message"
-        && context.activity.text.length > 0) {
-          context.activity.type = ActivityTypes.Message;
-          state.deleteConversationState();
-          await this.app.run(context);
-        } 
-    });
-  
-    this.app.authentication
-      .get(this.authConnectionName)
-      .onUserSignInFailure(async (context: TurnContext, state: ApplicationTurnState, error: AuthError) => {
-          // Failed to login
-          await context.sendActivity("Failed to login");
-          if (state.conversation.debug ?? false) {
-            await context.sendActivity(`Error message: ${error.message}`);
-          }
-    });
+        const adaptiveCard = CardFactory.adaptiveCard(card);
+        await context.sendActivity({ attachments: [adaptiveCard] }); 
+        
+        // Echo back users request
+        if (context.activity.channelData.source.name === "message"
+          && context.activity.text.length > 0) {
+            context.activity.type = ActivityTypes.Message;
+            state.deleteConversationState();
+            await this.app.run(context);
+          } 
+      });
+    
+      this.app.authentication
+        .get(this.authConnectionName)
+        .onUserSignInFailure(async (context: TurnContext, state: ApplicationTurnState, error: AuthError) => {
+            // Failed to login
+            await context.sendActivity("Failed to login");
+            if (state.conversation.debug ?? false) {
+              await context.sendActivity(`Error message: ${error.message}`);
+            }
+      });
+    
+      this.app.message("/signout", async (context: TurnContext, state: ApplicationTurnState) => {
+        await this.app.authentication.signOutUser(context, state, this.authConnectionName);
+    
+        // Echo back users request
+        await context.sendActivity("You have signed out");
+      });
 
-    this.app.message("/signout", async (context: TurnContext, state: ApplicationTurnState) => {
-      await this.app.authentication.signOutUser(context, state, this.authConnectionName);
-  
-      // Echo back users request
-      await context.sendActivity("You have signed out");
-    });
-
-    this.app.message("/signin", async (context: TurnContext, state: ApplicationTurnState) => {
-      const response = await this.app.authentication.signUserIn(context, state, this.authConnectionName);
-  
-      // Echo back users request
-      await context.sendActivity("Sign in request sent");
-    });
+      this.app.message("/signin", async (context: TurnContext, state: ApplicationTurnState) => {
+        const response = await this.app.authentication.signUserIn(context, state, this.authConnectionName);
+    
+        // Echo back users request
+        await context.sendActivity("Sign in request sent");
+      });
+    }
 
     // Listen for new members to join the conversation
     this.app.conversationUpdate(
@@ -256,6 +297,9 @@ export class TeamsAI {
               // Welcome user.
               const card = Utils.renderAdaptiveCard(welcomeCard);
               await context.sendActivity({ attachments: [card] });
+
+              // Add the conversation reference to the storage
+              this.addConversationReference(context.activity, state);
             }
           }
         }
@@ -267,6 +311,9 @@ export class TeamsAI {
     this.app.ai.action(actionNames.flaggedInputAction, flaggedInputAction);
     this.app.ai.action(actionNames.flaggedOutputAction, flaggedOutputAction);
 
+    // Register a handler to override the say command with custom logic
+    this.app.ai.action<PredictedSayCommand>(AI.SayCommandActionName, formatActionMessage);    
+    
     /**********************************************************************
      * FUNCTION: GET ACTIONS
      * Register a handler to handle the "getActions" semantic function
@@ -313,28 +360,11 @@ export class TeamsAI {
     this.app.ai.action(actionNames.debugOff, debugOff);
 
     /******************************************************************
-     * ACTION: GET COMPANY INFO
+     * ACTION: GET SEMANTIC GENERIC INFO
      *****************************************************************/
-    // Define a prompt action when the user sends a message containing the "getLatestInfo" action
-    this.app.ai.action(actionNames.getCompanyInfo, async (context: TurnContext, state: ApplicationTurnState) => getCompanyInfo(context, state, this.planner));
+    // Define a prompt action when the user sends a message containing the "getSemanticInfo" action
+    this.app.ai.action(actionNames.getSemanticInfo, async (context: TurnContext, state: ApplicationTurnState) => getSemanticInfo(context, state, this.planner));
 
-    /******************************************************************
-     * ACTION: GET COMPANY DETAILS
-     *****************************************************************/
-    // Define a prompt action when the user sends a message containing the "getLatestInfo" action
-    this.app.ai.action(
-      actionNames.getCompanyDetails, 
-      async (context: TurnContext, state: ApplicationTurnState, parameters: ChatParameters) => getCompanyDetails(context, state, parameters, this.planner));
-
-    /******************************************************************
-     * ACTION: Get Company Quote
-     * Register a handler to handle the "getCompanyStockQuote" action
-     * This action is used to get the address of a company
-     * 
-    *****************************************************************/
-      this.app.ai.action(
-        actionNames.getCompanyStockQuote,
-        async (context: TurnContext, state: ApplicationTurnState, parameters: ChatParameters) => getCompanyStockQuote(context, state, parameters, this.planner));  
 
     /******************************************************************
      * ACTION: CHAT WITH YOUR OWN DATA
@@ -364,6 +394,17 @@ export class TeamsAI {
     this.app.feedbackLoop(async (context: TurnContext, state: ApplicationTurnState, feedback: FeedbackLoopData) => {
       // Log the feedback
       this.logger.info(`Feedback received: ${JSON.stringify(feedback)}`);
+      switch (feedback.actionValue.reaction) {
+        case "like":
+          this.logger.trackMetric(MetricNames.LikeFeedbackCount, 1);
+          break;
+        case "dislike":
+          this.logger.trackMetric(MetricNames.DislikeFeedbackCount, 1);
+          break;
+        default:
+          break;
+      }
+      this.logger.trackEvent(EventNames.FeedbackReceived, { reaction: feedback.actionValue.reaction, feedback: feedback.actionValue.feedback });
       await context.sendActivity("Thank you for your feedback.");
       if (state.conversation.debug) {
         await context.sendActivity(`Feedback received: ${JSON.stringify(feedback)}`);
@@ -377,65 +418,16 @@ export class TeamsAI {
     this.app.handoff(async (context: TurnContext, state: ApplicationTurnState, continuation: string) => {
       // Log the handoff
       this.logger.info(`Handoff received: ${continuation}`);
-      await context.sendActivity("Continuing the conversation started with M365 Copilot.");
-      if (state.conversation.debug) {
-        await context.sendActivity(`Handoff received: ${continuation}`);
-      }
+      await context.sendActivity("Continuing the conversation from another chat/application.");
+      await context.sendActivity(`Handoff received: ${continuation}`);
+           
     });
-
-    /******************************************************************
-     * ADAPTIVE CARD ACTIONS: GetCompanyDetails
-     *****************************************************************/
-    this.app.adaptiveCards.actionExecute(
-      acActionNames.suggestedPrompt,
-      async (context: TurnContext, state: ApplicationTurnState, data: any) => suggestedPrompt(context, state, data, this.planner));
-
-    // Listen for Other Company command on thr adaptive card from the user
-    this.app.adaptiveCards.actionExecute(
-      acActionNames.otherCompany,
-      async (context: TurnContext, state: ApplicationTurnState, data: any) => otherCompany(context, state, data, this.planner));
 
     // Listen for /forgetDocument command and then delete the document properties from state
     this.app.adaptiveCards.actionExecute(actionNames.forgetDocuments, forgetDocuments);
 
-    // List for message extension search command
-    this.app.messageExtensions.query(commandNames.searchCmd, async (context: TurnContext, state: ApplicationTurnState, query: Query<Record<string, any>>) => searchCmd(context, state, query, this.planner, this.logger));
-
-    // Listen for message extension select item command
-    this.app.messageExtensions.selectItem(selectItem);
-
-    // Task Module handler
-    this.app.taskModules.fetch(
-      actionNames.getCompanyInfo,
-      async (
-        context: TurnContext,
-        state: ApplicationTurnState,
-        data: TData
-      ): Promise<any> => {
-        // Generate detailed information for the selected company
-        const entity: CompanyInfo = data.entity;
-
-        // call Entity Info Skill to get the entity details from Teams Copilot Starter API
-        const entityRecognitionSkill = new EntityRecognitionSkill(
-          context,
-          state,
-          this.planner
-        );
-
-        // Run the skill to get the entity details
-        const entityInfo = await entityRecognitionSkill.run(entity.name) as EntityInfo;
-        
-        // Generate and display Adaptive Card for the provided company name
-        const card = await ActionsHelper.generateAdaptiveCardForEntity(context, state, entityInfo, this.planner);
-
-        // if the document has been reviewed, show the approve/reject card
-        const taskModuleResponse: TaskModuleTaskInfo = {
-          title: entity.name,
-          card: card,
-        };
-        return taskModuleResponse;
-      }
-    );
+    // Listen for message extension search command
+    this.app.messageExtensions.query(commandNames.searchCmd, async (context: TurnContext, state: ApplicationTurnState, query: Query<Record<string, any>>) => searchCmd(context, state, query, this.logger));
 
     // Listen for /newchat command and then delete the conversation state
     this.app.message(
@@ -557,11 +549,12 @@ export class TeamsAI {
     this.app.message(
       BotMessageKeywords.chatDocument,
       async (context: TurnContext, state: ApplicationTurnState) => {
-        // change the prompt folder to ChatGPT
+        // change the prompt folder to QuestionWeb
         state.conversation.promptFolder = AIPrompts.QuestionWeb;
         await context.sendActivity("AI Copilot Skills are set to QuestionDocument");
       }
     );
+
 
     // In order to avoid the bot from processing multiple messages at the same time, 
     // We need manage the distributed state of the bot instance that is processing the
@@ -570,28 +563,47 @@ export class TeamsAI {
       // if the activity type is not a message, let it continue to process
       // Check if the message is a bot message keyword
       // If it is, let it continue to process without managing state
-      if (context.activity.type !== ActivityTypes.Message ||
-        Object.values(BotMessageKeywords).some(keyword => context.activity.text.startsWith(keyword as string))) {
-        return true;
+      switch (context.activity.type) {
+        case ActivityTypes.Message:
+          if (context.activity.text && Object.values(BotMessageKeywords).some(keyword => context.activity.text.startsWith(keyword as string))) {
+            return true;
+          }
+          break;
+        case ActivityTypes.Event:
+          switch (context.activity.name) {
+            case "ContinueConversation":
+              // If the event is a ContinueConversation event, let it continue to process as a message type
+              context.activity.type = ActivityTypes.Message;
+              return true;
+            default:
+              return false;
+          }
+          break;
+        default:
+          return true;
       }
 
-      try {
-        // Acquire a lease for the conversation blob
-        const leaseId = await this.stateStorageManager.acquireLeaseAsync(this.getConversationKey(context.activity));
-        // Store the leaseId in the temp state
-        state.temp.leaseId = leaseId;
-      } catch (error) {
-        if (error instanceof RestError && error?.code == "LeaseAlreadyPresent") {
-          // There was an error acquiring the lease, which means that another thread or 
-          // bot instance is currenty processing a request for this conversation.
-          this.logger.error(`Error acquiring lease: ${error}`);
-          await context.sendActivity("Please wait for the previous action to complete before sending a new request.");
-          return false;
+      if (this.stateStorageManager) {
+        try {
+          // Acquire a lease for the conversation blob
+          const leaseId = await this.stateStorageManager.acquireLeaseAsync(this.getConversationKey(context.activity));
+          // Store the leaseId in the temp state
+          state.temp.leaseId = leaseId;
+        } catch (error) {
+          if (error instanceof RestError && error?.code == "LeaseAlreadyPresent") {
+            // There was an error acquiring the lease, which means that another thread or 
+            // bot instance is currenty processing a request for this conversation.
+            this.logger.error(`Error acquiring lease: ${error}`);
+            await context.sendActivity("Please wait for the previous action to complete before sending a new request.");
+            return false;
+          }
+          // If we encountered another error that we are not expecting,
+          // throw the error, so that the bot can stop processing the request
+          throw error;
         }
-        // If we encountered another error that we are not expecting,
-        // throw the error, so that the bot can stop processing the request
-        throw error;
       }
+      // Add the conversation reference to the storage
+      this.addConversationReference(context.activity, state);
 
       // Continue processing the request
       return true;
@@ -601,7 +613,15 @@ export class TeamsAI {
     // In order for it to be available for the next request from the conversation
     this.app.turn(TeamsAI.AfterTurn, async (context: TurnContext, state: ApplicationTurnState) => {
       try {
-        if (state.temp.leaseId) {
+        const chatHistory = CacheHelper.getChatHistory(state, 10);
+        // if the assistant response is missing, remove the first user's prompt
+        chatHistory.forEach((item, index) => {
+          if (item.role === CopilotRoles.user && chatHistory[index + 1]?.role !== CopilotRoles.copilot) {
+            chatHistory.shift();
+            state.temp.input = JSON.stringify(chatHistory);
+          }
+        });
+        if (this.stateStorageManager && state.temp.leaseId) {
           // Release the lease for the conversation blob
           await this.stateStorageManager.releaseLeaseAsync(this.getConversationKey(context.activity), state.temp.leaseId); 
         }
@@ -650,10 +670,37 @@ export class TeamsAI {
     }
   }
 
+  /**
+   * This method is called when the bot sends a proactive message to all users in the team
+   * @param context
+   * @returns
+   */
+  public async SendNotificationToAllUsersAsync(context: TurnContext) {
+    const TeamMembers = await TeamsInfo.getPagedMembers(context);
+    TeamMembers.members.map(async member => {
+        const ref = TurnContext.getConversationReference(context.activity);
+        ref.user = member;
+        const botId = ref.bot ? ref.bot.id : this.env.data.BOT_ID ?? "";
+        await context.adapter.continueConversationAsync(botId, ref, async (context) => {
+            await context.sendActivity("Proactive hello.");
+        });
+    });
+  }
+
   ///////////////////////////
   // Private helper methods //
   ///////////////////////////
   private getConversationKey(activity: Activity): string {
     return `${activity.channelId}/${activity.recipient.id}/conversations/${activity.conversation.id}`;
+  }
+
+  private addConversationReference(activity: Activity, state: ApplicationTurnState): void {
+    // Obtain the conversation reference from the activity
+    const conversationReference = TurnContext.getConversationReference(activity);
+     // Ad the conversation reference to the cache
+    CacheHelper.addConversationReference(state, conversationReference);
+
+    // Add the conversation reference to the memory object
+    TeamsAI.ConversationReferences[(conversationReference.conversation)? conversationReference.conversation.id : activity.conversation.id] = conversationReference;
   }
 }

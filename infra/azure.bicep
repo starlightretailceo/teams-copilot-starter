@@ -4,13 +4,16 @@
 param botResourceBaseName string
 
 @description('Required when create Azure Bot service')
-param botAadAppClientId string
+param botId string
+
+param location string = resourceGroup().location
 
 @secure()
 @description('Required by Bot Framework package in your bot project')
 param botAadAppClientSecret string
 param botAppType string
 param teamsFxEnv string
+param appName string
 param appVersion string
 
 param storageSKU string
@@ -23,8 +26,8 @@ param teamsAppId string
 
 param botServerfarmsName string = '${botResourceBaseName}plan'
 param botWebAppName string = '${botResourceBaseName}web'
+param botChatHistoryStorageName string = '${botResourceBaseName}sta'
 
-param location string = resourceGroup().location
 param aadAppClientId string
 param aadAppTenantId string
 param aadAppOauthAuthorityHost string
@@ -39,12 +42,19 @@ param openAIApiVersion string
 param defaultPromptName string
 param storageContainerName string
 param maxTurns string
-param botChatHistoryStorageName string = '${botResourceBaseName}sta'
 param maxFileSize string
 param maxPages string
 param webDataSource string
 param documentDataSource string
 param indexFolderPath string
+@secure()
+param storageSasToken string
+param azureSearchEndpoint string
+@secure()
+param azureSearchKey string
+param azureSearchIndexName string
+param azureSearchSourceName string
+param routeUknownToSemanticInfo string
 
 var oauthAuthority = uri(aadAppOauthAuthorityHost, aadAppTenantId)
 var teamsMobileOrDesktopAppClientId = '1fec8e78-bce4-4aaf-ab1b-5451cc387264'
@@ -70,6 +80,7 @@ resource botAppInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 // Azure Storage that hosts Tab static web site and Bot chat history
+// Deploy Azure Storage resource only if the flag is set to true
 resource botStorageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
   kind: 'StorageV2'
   location: location
@@ -81,6 +92,7 @@ resource botStorageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
     name: storageSKU
   }
 }
+
 
 // Compute resources for the Bot Web App
 resource botServerfarm 'Microsoft.Web/serverfarms@2021-02-01' = {
@@ -118,7 +130,7 @@ resource botWebApp 'Microsoft.Web/sites@2021-02-01' = {
         }
         {
           name: 'BOT_ID'
-          value: botAadAppClientId
+          value: botId
         }
         {
           name: 'BOT_PASSWORD'
@@ -138,9 +150,10 @@ resource botWebAppSettings 'Microsoft.Web/sites/config@2021-02-01' = {
     WEBSITE_NODE_DEFAULT_VERSION: '~18'
     WEBSITE_RUN_FROM_PACKAGE: '1'
     TEAMSFX_ENV: teamsFxEnv
+    APP_NAME: appName
     APP_VERSION: appVersion
     TEAMS_APP_ID: teamsAppId
-    BOT_ID: botAadAppClientId
+    BOT_ID: botId
     BOT_PASSWORD: botAadAppClientSecret
     BOT_DOMAIN: botWebApp.properties.defaultHostName
     BOT_APP_TYPE: botAppType
@@ -154,6 +167,7 @@ resource botWebAppSettings 'Microsoft.Web/sites/config@2021-02-01' = {
     OPENAI_EMBEDDING_MODEL: openAIEmbeddingModel
     STORAGE_ACCOUNT_NAME: botStorageAccount.name
     STORAGE_ACCOUNT_KEY: botStorageAccount.listKeys().keys[0].value
+    STORAGE_SAS_TOKEN: storageSasToken
     OPENAI_API_VERSION: openAIApiVersion
     VECTRA_INDEX_PATH: indexFolderPath
     DEFAULT_PROMPT_NAME: defaultPromptName
@@ -165,6 +179,11 @@ resource botWebAppSettings 'Microsoft.Web/sites/config@2021-02-01' = {
     MAX_FILE_SIZE: maxFileSize
     MAX_PAGES: maxPages
     RUNNING_ON_AZURE: '1'
+    AZURE_SEARCH_ENDPOINT: azureSearchEndpoint
+    AZURE_SEARCH_KEY: azureSearchKey
+    AZURE_SEARCH_INDEX_NAME: azureSearchIndexName
+    AZURE_SEARCH_SOURCE_NAME: azureSearchSourceName
+    ROUTE_UKNOWN_ACTION_TO_SEMANTIC: routeUknownToSemanticInfo
   }
 }
 
@@ -173,14 +192,14 @@ module azureBotRegistration './botRegistration/azurebot.bicep' = {
   name: 'Azure-Bot-registration'
   params: {
     resourceBaseName: botResourceBaseName
-    botAadAppClientId: botAadAppClientId
+    botId: botId
     botAppDomain: botWebApp.properties.defaultHostName
     botDisplayName: botDisplayName
   }
 }
 
 // Create a blob service for the Bot chat history
-resource botBlobService 'Microsoft.Storage/storageAccounts/blobServices@2022-09-01' = {
+resource botBlobService 'Microsoft.Storage/storageAccounts/blobServices@2022-09-01' =  {
   name: 'default'
   parent: botStorageAccount
 }
@@ -198,4 +217,4 @@ resource botStorageContainer 'Microsoft.Storage/storageAccounts/blobServices/con
 output BOT_AZURE_APP_SERVICE_RESOURCE_ID string = botWebApp.id
 output BOT_DOMAIN string = botWebApp.properties.defaultHostName
 output STORAGE_ACCOUNT_NAME string = botStorageAccount.name
-output STORAGE_ACCOUNT_KEY string = botStorageAccount.listKeys().keys[0].value
+// output STORAGE_ACCOUNT_KEY string = botStorageAccount.listKeys().keys[0].value

@@ -68,7 +68,105 @@ The Teams Copilot Starter is made to support various AI systems for moderating i
 
 ### External Data Sources
 
-External data sources allow the injection of relevant information from external sources into prompts, such as vector databases or cognitive search. A vector data source makes it easy to add [RAG](https://en.wikipedia.org/wiki/Prompt_engineering#Retrieval-augmented_generation) to any prompt, allowing for better and more accurate replies from the bot. Teams Copilot Starter comes with a built-in local vector database for Node.js, called Vectra. Using Vectra you can chat with either a website content (must be publicly accessible) or locally uploaded documents in either text (TXT) or PDF format. For each data source, a max number of tokens to use can be specified via `maxTokens` variable. For more information see [Vectra](./docs/concepts/vectra.md) guide.
+External data sources allow the injection of relevant information from external sources into prompts, such as vector databases or cognitive search. A vector data source makes it easy to add [RAG](https://en.wikipedia.org/wiki/Prompt_engineering#Retrieval-augmented_generation) to any prompt, allowing for better and more accurate replies from the bot. Teams Copilot Starter comes with two RAG options:
+
+1. A built-in local vector database for Node.js, called Vectra. Using Vectra you can chat with either a website content (must be publicly accessible) or locally uploaded documents in either text (TXT) or PDF format. For each data source, a max number of tokens to use can be specified via `maxTokens` variable. For more information see [Vectra](./docs/concepts/vectra.md) guide.
+2. Azure AI Search, that provides secure information retrieval at scale over user-owned content in traditional and generative AI search applications. For more information, see [What's Azure AI Search?](https://learn.microsoft.com/en-us/azure/search/search-what-is-azure-search). Across the Azure platform, Azure AI Search can integrate with other Azure services in the form of indexers that automate data ingestion/retrieval from Azure data sources, and skillsets that incorporate consumable AI from Azure AI services, such as image and natural language processing, or custom AI that you create in Azure Machine Learning or wrap inside Azure Functions.
+Within each Action Planner’s prompt management system, a list of data sources can be registered. For each data source, a max number of tokens to use is specified, via maxTokens.
+The Teams Copilot Starter provides the template data source configuration, that you can insert into the configuration of your Action Planner's prompt, for which you want to enable RAG Azure Search.
+Here's the template, you can add to the `config.json` file of your prompt:
+
+```json
+"data_sources": [
+  {
+    "type": "azure_search",
+    "parameters": {
+      "index_name": "${AZURE_SEARCH_INDEX_NAME}",
+      "semantic_configuration": "default",
+      "query_type": "vector_semantic_hybrid",
+      "fields_mapping": {
+      },
+      "in_scope": false,
+      "role_information": "You are an AI assistant, who is an expert on answering questions over the given context.",
+      "filter": null,
+      "strictness": 3,
+      "top_n_documents": 5,
+      "embedding_dependency": {
+        "type": "deployment_name",
+        "deployment_name": "${OPENAI_EMBEDDING_MODEL}"
+      },
+      "authentication": {
+        "type": "api_key",
+        "key": "${AZURE_SEARCH_KEY}"
+      }
+    }
+  }      
+]      
+```
+
+where:
+
+- `AZURE_SEARCH_INDEX_NAME` is an Azure Search index name.
+- `AZURE_SEARCH_KEY` is a Azure Search API Key.
+- `OPENAI_EMBEDDING_MODEL` is a deployment name of the Azure Open AI Embeddings model, which is required when you use the `semantic` or `hybrid semantic` query type.
+
+Also, notice the other settings in this template:
+
+- `in_scope`: when it's **true**, the RAG limits responses to your data content only. When it's **false**, the LLM response may include generic Chat GPT data, when relevant response cannot be found in the RAG index with the probability strictness defined in the next parameter.
+- `strictness`: Strictness sets the threshold to categorize documents as relevant to your queries. Raising strictness means a higher threshold for relevance and filtering out more documents that are less relevant for responses. Very high strictness could cause failure to generate responses due to limited available documents. The default strictness is 3.
+- `top_n_documents`: This specifies the number of top-scoring documents from your data index used to generate responses. You want to increase the value when you have short documents or want to provide more context. The default value is 5. Note: if you set the value to 20 but only have 10 documents in your index, only 10 will be used.
+Here's a sample ChatGPT configuration that includes Azure AI Search RAG data source:
+
+```json
+{
+  "schema": 1.1,
+  "description": "You are an AI assistant, who is an expert on answering questions over the given context.",
+  "type": "completion",
+  "completion": {
+    "completion_type": "chat",
+    "include_history": true,
+    "include_input": true,
+    "max_input_tokens": 2800,
+    "max_tokens": 1000,
+    "temperature": 0.9,
+    "top_p": 0.0,
+    "presence_penalty": 0.6,
+    "frequency_penalty": 0.0,
+    "stop_sequences": [],
+    "data_sources": [
+      {
+        "type": "azure_search",
+        "parameters": {
+          "index_name": "${AZURE_SEARCH_INDEX_NAME}",
+          "semantic_configuration": "default",
+          "query_type": "vector_semantic_hybrid",
+          "fields_mapping": {
+          },
+          "in_scope": false,
+          "role_information": "You are an AI assistant, who is an expert on answering questions over the given context.",
+          "filter": null,
+          "strictness": 3,
+          "top_n_documents": 5,
+          "embedding_dependency": {
+            "type": "deployment_name",
+            "deployment_name": "${OPENAI_EMBEDDING_MODEL}"
+          },
+          "authentication": {
+            "type": "api_key",
+            "key": "${AZURE_SEARCH_KEY}"
+          }
+        }
+      }      
+    ]      
+  },
+  "augmentation": {
+      "augmentation_type": "none"
+  }
+}
+```
+
+
+To build your own Azure AI Search Indexer, follow the steps described in this article: [Create an index in Azure AI Search](https://learn.microsoft.com/en-us/azure/search/search-how-to-create-search-index?tabs=portal).
 
 ### Enable Single Sign-on with authorized access to a secured API
 
@@ -90,6 +188,7 @@ See [Skill Customization Guide](./docs/concepts/skill-customization.md) and [Act
  To run the bot in your local dev machine, you will need:
 
 - [Node.js](https://nodejs.org/), supported versions: 16, 18. The verified Node version that this project supports is 18.19.0
+- [Yarn](https://yarnpkg.com/), supported version 1.22.
 - A [Microsoft 365 account for development](https://docs.microsoft.com/microsoftteams/platform/toolkit/accounts) for Microsoft Teams. This account need to be enabled to manually side load Teams App into your Teams Tenant.
 - Visual Studio Code.
 - [Teams Toolkit Visual Studio Code Extension](https://aka.ms/teams-toolkit) version 5.0.0 and higher or [TeamsFx CLI](https://aka.ms/teamsfx-cli)
@@ -107,15 +206,41 @@ See [Skill Customization Guide](./docs/concepts/skill-customization.md) and [Act
     git clone https://github.com/microsoft/teams-copilot-starter.git
     ```
 
-1. Duplicate the `.env.dev` in the `env/` folder. Rename the file to `.env.local`.
+1. Navigate to `ENVIRONMENT` section of the TeamsFX Extension and add a new environment called `local`. You can also create an environment `testool`, if you're planning to run your bot in Test Tool environment (alternatively to MS Teams). Alternatively, you can create the pair of `.env.[environment]` and `.env.[environment].user` in the `env` folder.
 
-1. Set `TEAMSFX_ENV` to `local` and set `VECTRA_INDEX_PATH` to `../index` in the `.env.local` file.
+1. Open the `.env.[env]` in the `env/templates` folder and copy and paste its complete content into a new environment file. For example, `.env.local`. Open `env.[env].user` file and copy and past its content into a corresponding environment file you've just created. For example, `.env.local.user`.
+Repeat the same procedure for each new environment.
 
-1. Fill the `OPENAI_KEY`, `OPENAI_ENDPOINT`, `OPENAI_MODEL`, `OPENAI_API_VERSION`, `OPENAI_EMBEDDING_MODEL`, `STORAGE_ACCOUNT_NAME`, and `STORAGE_ACCOUNT_KEY` variables appropriately.
+1. Fill all environment variables that you are intended to use in your specific scenario. Leave other optional variables unchanged.
 
-*NOTE*: If you want your prompt template to use a different model other than the default (configured in the `OPENAI_MODEL` environment variable), you can set the model inside the `completion` object that is defined in the `config.json` file in the `prompts` folder.
+>Note: If the environment variable's value starts and ends with `<>`, then this environment variable will be ignored in the run-time.
+-------------
+> Important! All secrets are stored in `.env.[env].user` files only!
+-------------
 
-## Environment Variables
+1. Set `TEAMSFX_ENV` to the appropriate environment name. For example, `.env.local` file will have this environment variable equal to `local`.  
+
+1. Set `VECTRA_INDEX_PATH` to `../index` for all local environments. For Azure deployed environment, like `dev`, this variable should be assigned `D:\\Home\\index` value.
+
+1. Fill the `AZURE_SEARCH_ENDPOINT`, `AZURE_SEARCH_INDEX_NAME` and `SECRET_STORAGE_SAS_TOKEN` optional variables if you choose to use Azure AI Search to index your own documents in one of the available Azure storages. The `SECRET_STORAGE_SAS_TOKEN` would only need to be set if the RAG documents are stored in Azure Blob, and you want these documents to be opened by users when their click on the citation reference.
+
+1. The following are the secret values where you will enter the secrets for various services you are intended to use. If one of these services are unknown or not in use in your applicable scenario, leave them with the default placeholder `<...>` values.
+
+```yaml
+# These value need to be updated before running provision.
+SECRET_OPENAI_KEY=<value of an OpenAI key>
+SECRET_STORAGE_ACCOUNT_KEY=<value of storage account key>
+SECRET_APPLICATIONINSIGHTS_INSTRUMENTATION_KEY=<value of an Application Insights instrumentation key>
+SECRET_STORAGE_SAS_TOKEN=<value of a storage SAS token>
+SECRET_AZURE_SEARCH_KEY=<value of an Azure Search key>
+
+# If using a custom Copilot API, set the following variables
+SECRET_CUSTOM_API_CLIENT_SECRET=<value of a custom API client secret in the HTTPS header>
+```
+
+>NOTE: If you want your prompt template to use a different model other than the default (configured in the `OPENAI_MODEL` environment variable), you can set the model inside the `completion` object that is defined in the `config.json` file in the `prompts` folder.
+
+## Using Environment Variables
 
 When you run the sample using the default TeamsFx launch configurations (i.e. 'Debug (Edge)') locally, TeamsFx will run the `teamsapp.local.yml` pipeline. This pipeline and the TeamsFx debug tasks (`.vscode/tasks.json`) will save new environment variables to the `.env.local` file for subsequent runs. At the bottom of the `teamsapp.local.yml` file, you will see the following:
 
@@ -127,7 +252,7 @@ When you run the sample using the default TeamsFx launch configurations (i.e. 'D
       target: ./src/.localConfigs
       envs:
         # Required custom environment variables
-        OPENAI_KEY: ${{OPENAI_KEY}}
+        OPENAI_KEY: ${{SECRET_OPENAI_KEY}}
         OPENAI_ENDPOINT: ${{OPENAI_ENDPOINT}}
         ....
 ```
@@ -145,15 +270,22 @@ This action in the pipeline copies the environment variables from the `.env.loca
 | `OPENAI_EMBEDDING_MODEL` | The model to be used for embeddings. For Azure OpenAI this is the name of the deployment to use. This setting is only used when you chat with a document or web content. |
 | `STORAGE_ACCOUNT_NAME` | The name of the storage account |
 | `STORAGE_ACCOUNT_KEY` | The key for the storage account |
+| `STORAGE_SAS_TOKEN` | The SAS token for the Azure Search source documents blob container |
+| `AZURE_SEARCH_ENDPOINT` | The URL endpoint to the Azure AI Search service |
+| `AZURE_SEARCH_KEY` | The key for the Azure AI Search service |
+| `AZURE_SEARCH_INDEX_NAME` | The name of the Azure AI Search index |
 | `VECTRA_INDEX_PATH` | The path of the Vectra database index. This is used for non-production scenarios. When running locally, the value is `../index` and when running in Azure, the value is `D:\\Home\\index`. |
 | `OPENAI_API_VERSION` | This is only used by Azure OpenAI |
 | `DEFAULT_PROMPT_NAME` | The default prompt name. The default is `plan` and refers to the folder name in `prompts/` folder |
 | `STORAGE_CONTAINER_NAME` | The name of the storage container that will store conversation state |
 | `WEBDATA_SOURCE_NAME` | The name of the web data source. If this value is changed, it will also need to be changed in the `prompts/questionWeb/config.json` file |
 | `DOCUMENTDATA_SOURCE_NAME` | The name of the document data source. If this value is changed, it will also need to be changed in the `prompts/questionDocument/config.json` file |
+| `AZURE_SEARCH_SOURCE_NAME` | The name of the Azure AI Search data source property. If this value is changed, it will also need to be changed in the `prompts/chatGPT/config.json` file |
+| `ROUTE_UKNOWN_ACTION_TO_SEMANTIC` | The boolean flag that sets whether the model routes all unknown actions to the Semantic Info action |
 | `MAX_TURNS` | The maximum number of turns |
 | `MAX_FILE_SIZE` | The maximum file size |
 | `MAX_PAGES` | The maximum number of pages |
+| `SECRET_STORAGE_SAS_TOKEN` | The SAS token for the Azure blob storage where the RAG documents are uploaded. It allows the document to be opened when the user decides to click on the citation link |
 | `APPLICATIONINSIGHTS_INSTRUMENTATION_KEY` | The key for application insights. This is currently not used in local development, but can be enabled by adding it to the .env.local file and uncommenting the corresponding line in the `teamsapp.local.yml` file |
 | `CUSTOM_API_CLIENT_ID` | The client ID used when using a custom OpenAI API. This is currently not used in local development, but can be enabled by adding it to the .env.local file and uncommenting the corresponding line in the `teamsapp.local.yml` file. |
 | `CUSTOM_API_CLIENT_SECRET` | The client secret used when using a custom OpenAI API. This is currently not used in local development, but can be enabled by adding it to the .env.local file and uncommenting the corresponding line in the `teamsapp.local.yml` file. |
@@ -171,7 +303,7 @@ Teams App Test Tool (Test Tool) makes debugging bot-based apps effortless. You c
 
 To get Teams Copilot Starter debugging with Teams App Test Tool, follow these steps:
 
-1. Clone `.env.testtool.template` file in `env` folder to `.env.testtool`, then follow the above table to fill out the blanks for the required environment variables.
+1. Follow the earlier steps to create and fill the `testtool` environment variables in the files `.env.testtool` and `env.testtool.user`.
 
 2. Select `Debug in Test Tool (Preview)` from the Debug Menu, and start the debug (F5).
 
@@ -340,21 +472,9 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 
 You may encounter the following known issues documented and assigned for the futher investigation in the repo's Issues section:
 
-### Issue [#1](https://github.com/microsoft/teams-copilot-starter/issues/1): The Bot's LLM takes only the first document content embeddings from the Vectra data sources when multiple documents are uploaded
+### Issue [#1](https://github.com/microsoft/teams-copilot-starter/issues/15): When using combined action with a url "give me details about Microsoft and summarize https://en.wikipedia.org/wiki/Earth", the webretrieval fails.
 
-If I try to chat with more than one document in the sequence, you won't get the correct respond from the bot starting from the second uploaded document until you reset the system by prompting `/reset` or ask Bot to forget the previously uploaded documents: `forget documents` or `/forget` using the short command.
-
-This issue will be addressed in the upcoming updates and the status of this issue fix will be posted in the Issues section of the repo.
-
-### Issue [#2](https://github.com/microsoft/teams-copilot-starter/issues/2): When multiple users try to chat with their own documents, the Local Vectra Index will contain the documents from all users
-
-If you try to chat with a specific document when running in Azure environment, there are chances that your document will be shared with another user(s).
-
-This issue will be addressed in the upcoming updates and the status of this issue fix will be posted in the Issues section of the repo.
-
-### Issue [#3](https://github.com/microsoft/teams-copilot-starter/issues/3) When more than one document is uploaded, bot returns the same response the same number of times as loaded documents
-
-If you load two or more documents, the bot will give the same result the same number of loaded documents.
+When a prompt of a user contains multiple actions the same prompt is sent to each action. In case of Webretrieval this might lead that the AI is generation the wrong response and will use  the first part of the prompt to answer the question of the retreived website. 
 
 This issue will be addressed in the upcoming updates and the status of this issue fix will be posted in the Issues section of the repo.
 

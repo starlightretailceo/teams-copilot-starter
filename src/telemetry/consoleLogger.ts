@@ -3,10 +3,9 @@ import { EventEntry, ILogger, LogEntry, MetricEntry } from "../types";
 import { Env } from "../env";
 
 export class ConsoleLogger implements ILogger {
-  private env: Env;
-  constructor() {
-    this.env = container.resolve(Env);
-  }
+  private readonly env: Env = container.resolve(Env);
+
+  constructor() {}
 
   private getMsg(logEntry: LogEntry): string {
     return `[${logEntry.module}]: [appVersion: ${this.env.data.APP_VERSION}] ${logEntry.message}`;
@@ -37,20 +36,18 @@ export class ConsoleLogger implements ILogger {
   }
 
   public trackEvent(eventEntry: EventEntry): void {
-    const msg = `Event Entry %c${eventEntry.name} [%c${
+    const msg = `Event Entry ${eventEntry.name} [${
       eventEntry.module
-    }]: [appVersion: ${this.env.data.APP_VERSION}] %c${JSON.stringify(
+    }]: [appVersion: ${this.env.data.APP_VERSION}] ${JSON.stringify(
       eventEntry.properties
     )}`;
     console.log(msg);
   }
 
-  public trackDurationMetric(metricEntry: MetricEntry): void {
-    const msg = `Metric Entry %c${metricEntry.name} [%c${
-      metricEntry.name
-    }]: [appVersion: ${this.env.data.APP_VERSION}] %c${JSON.stringify(
-      metricEntry
-    )}`;
+  public trackMetric(metricEntry: MetricEntry): void {
+    const msg = `Metric Entry [${metricEntry.name}]: [appVersion: ${
+      this.env.data.APP_VERSION
+    }] ${JSON.stringify(metricEntry)}`;
     console.log(msg);
   }
 }

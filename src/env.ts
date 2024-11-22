@@ -1,3 +1,4 @@
+/* eslint-disable no-case-declarations */
 import path from "path";
 import "reflect-metadata";
 import { injectable, singleton } from "tsyringe";
@@ -6,15 +7,70 @@ import { z, RefinementCtx } from "zod";
 const OpenAIType = z.enum(["OpenAI", "AzureOpenAI", "CustomAI"]);
 type OpenAIType = z.infer<typeof OpenAIType>;
 
+const botRequiredFields = ["BOT_ID", "BOT_PASSWORD", "BOT_DOMAIN"];
+const authRequiredFields = [
+  "AAD_APP_CLIENT_ID",
+  "AAD_APP_CLIENT_SECRET",
+  "AAD_APP_OAUTH_AUTHORITY_HOST",
+  "AAD_APP_TENANT_ID",
+];
+const azureSearchRequiredFields = [
+  "AZURE_SEARCH_ENDPOINT",
+  "AZURE_SEARCH_KEY",
+  "AZURE_SEARCH_INDEX_NAME",
+  "AZURE_SEARCH_SOURCE_NAME",
+  "STORAGE_SAS_TOKEN",
+];
+const customApiRequiredFields = [
+  "CUSTOM_OPEN_API_BASE_URL",
+  "CUSTOM_API_CLIENT_ID",
+  "CUSTOM_API_CLIENT_SECRET",
+];
+
 @injectable()
 @singleton()
 class Env {
-  private openAIHostName = "api.openai.com";
-  private azureOpenAIHostName = "openai.azure.com";
+  public readonly data: z.infer<any>;
+  public readonly environment = process.env.TEAMSFX_ENV || "local";
+  private readonly openAIHostName = "api.openai.com";
+  private readonly azureOpenAIHostName = "openai.azure.com";
 
+  /**
+   * Constructor
+   */
   constructor() {
     try {
-      this.data = this.schema.parse(process.env);
+      switch (this.environment) {
+        case "dev":
+        case "local":
+          {
+            const partialFields = this.schema.partial();
+            this.data = partialFields
+              .superRefine(this.openAIRefiner)
+              .superRefine(this.azureSearchRefiner)
+              .superRefine(this.customOpenApiRefiner)
+              .superRefine((data: any, ctx: RefinementCtx) =>
+                this.specialFieldsRefiner(data, ctx, botRequiredFields)
+              )
+              .superRefine((data: any, ctx: RefinementCtx) =>
+                this.specialFieldsRefiner(data, ctx, authRequiredFields)
+              )
+              .parse(process.env);
+          }
+          return;
+        case "testtool":
+          {
+            const partialFields = this.schema.partial();
+            this.data = partialFields
+              .superRefine(this.openAIRefiner)
+              .superRefine(this.azureSearchRefiner)
+              .superRefine(this.customOpenApiRefiner)
+              .parse(process.env);
+          }
+          return;
+        default:
+          throw new Error(`Unknown environment: ${this.environment}`);
+      }
     } catch (error) {
       if (error instanceof z.ZodError) {
         const { fieldErrors } = error.flatten();
@@ -23,22 +79,25 @@ class Env {
             errors ? `${field}: ${errors.join(", ")}` : field
           )
           .join("\n  ");
-        //this.logger.error(`Missing environment variables:\n  ${errorMessage}`);
         throw new Error(`Missing environment variables:\n  ${errorMessage}`);
       }
+      throw error;
     }
   }
 
-  private urlEndsWithHostname = (endpoint: string, hostname: string) => {
-    let url: URL;
-    try {
-      url = new URL(endpoint);
-    } catch (error) {
-      return false;
-    }
-    return url.hostname.endsWith(hostname);
+  public isProvided = (key: string): boolean => {
+    return (
+      this.data[key] !== undefined &&
+      !this.valueStartsWithPlaceholder(this.data[key])
+    );
   };
 
+  /**
+   * Refiner for OpenAI fields that require additional validation
+   * @param data
+   * @param ctx
+   * @returns
+   */
   private openAIRefiner = (data: any, ctx: RefinementCtx) => {
     // based on the OpenAI Endpoint, set the OpenAI Type and validate the required fields
     let isValid = true;
@@ -65,26 +124,6 @@ class Env {
       // This is used for authentication to the custom AI endpoint
       // But can also be modified to work with your system requirements
       data.OPENAI_TYPE = OpenAIType.Enum.CustomAI;
-
-      // This is used for authentication to the custom AI endpoint
-      if ((data.CUSTOM_API_CLIENT_ID?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "CUSTOM_API_CLIENT_ID is required.",
-          path: [data.OPENAI_TYPE],
-        });
-        isValid = false;
-      }
-
-      // This is used for authentication to the custom AI endpoint
-      if ((data.CUSTOM_API_CLIENT_SECRET?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "CUSTOM_API_CLIENT_SECRET is required.",
-          path: [data.OPENAI_TYPE],
-        });
-        isValid = false;
-      }
     }
 
     // Build the vectra index path
@@ -96,79 +135,62 @@ class Env {
     return isValid;
   };
 
-  private botIDRefiner = (data: any, ctx: RefinementCtx) => {
-    // based on the TeamsFX environment, set the BOT_ID and BOT_PASSWORD
-    let isValid = true;
-    // Check the presence of BOT_ID, BOT_PASSWORD and BOT_DOMAIN when not using TeamsFX Test Toolkit
-    if (data.TEAMSFX_ENV !== "testtool") {
-      if ((data.BOT_ID?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "BOT_ID is required.",
-          path: [data.BOT_ID],
-        });
-        isValid = false;
-      }
-      if ((data.BOT_PASSWORD?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "BOT_PASSWORD is required.",
-          path: [data.BOT_PASSWORD],
-        });
-        isValid = false;
-      }
-      if ((data.BOT_DOMAIN?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "BOT_DOMAIN is required.",
-          path: [data.BOT_DOMAIN],
-        });
-        isValid = false;
-      }
-    }
-
-    return isValid;
+  /**
+   * Refiner for custom Open API fields that require additional validation
+   * @param data
+   * @param ctx
+   * @returns
+   */
+  private customOpenApiRefiner = (data: any, ctx: RefinementCtx) => {
+    // based on the custom Open API Base URL, validate the required fields, otherwise skip
+    return !data.CUSTOM_OPEN_API_BASE_URL ||
+      this.valueStartsWithPlaceholder(data.CUSTOM_OPEN_API_BASE_URL)
+      ? true
+      : this.specialFieldsRefiner(data, ctx, customApiRequiredFields);
   };
 
-  private authRefiner = (data: any, ctx: RefinementCtx) => {
-    // based on the TeamsFX environment, set the BOT_ID and BOT_PASSWORD
+  /**
+   * Refiner for Azure Search fields that require additional validation
+   * @param data
+   * @param ctx
+   * @returns
+   */
+  private azureSearchRefiner = (data: any, ctx: RefinementCtx) => {
+    // based on the Azure AI Search URL, validate the required fields, otherwise skip
+    return !data.AZURE_SEARCH_ENDPOINT ||
+      this.valueStartsWithPlaceholder(data.AZURE_SEARCH_ENDPOINT)
+      ? true
+      : this.specialFieldsRefiner(data, ctx, azureSearchRequiredFields);
+  };
+
+  /**
+   * Refiner for special fields that require additional validation
+   * @param data
+   * @param ctx
+   * @param requiredFields
+   * @returns
+   */
+  private specialFieldsRefiner = (
+    data: any,
+    ctx: RefinementCtx,
+    requiredFields: any[]
+  ) => {
     let isValid = true;
-    // Check the presence of AAD_APP_CLIENT_ID, AAD_APP_CLIENT_SECRET, AAD_APP_OAUTH_AUTHORITY and AAD_APP_TENANT_ID
-    // when not using TeamsFX Test Toolkit
-    if (data.TEAMSFX_ENV !== "testtool") {
-      if ((data.AAD_APP_CLIENT_ID?.length ?? 0) === 0) {
+
+    // Check the presence of all required fields in the data
+    requiredFields.forEach((field) => {
+      if (
+        (data[field]?.length ?? 0) === 0 ||
+        this.valueStartsWithPlaceholder(data[field])
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "AAD_APP_CLIENT_ID is required.",
-          path: [data.AAD_APP_CLIENT_ID],
+          message: `${field} is required.`,
+          path: [data[field]],
         });
         isValid = false;
       }
-      if ((data.AAD_APP_CLIENT_SECRET?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "AAD_APP_CLIENT_SECRET is required.",
-          path: [data.AAD_APP_CLIENT_SECRET],
-        });
-        isValid = false;
-      }
-      if ((data.AAD_APP_OAUTH_AUTHORITY_HOST?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "AAD_APP_OAUTH_AUTHORITY_HOST is required.",
-          path: [data.AAD_APP_OAUTH_AUTHORITY_HOST],
-        });
-        isValid = false;
-      }
-      if ((data.AAD_APP_TENANT_ID?.length ?? 0) === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "AAD_APP_TENANT_ID is required.",
-          path: [data.AAD_APP_TENANT_ID],
-        });
-        isValid = false;
-      }
-    }
+    });
 
     return isValid;
   };
@@ -177,45 +199,63 @@ class Env {
     return localEnv ? path.join(__dirname, value) : value;
   }
 
-  private schema = z
-    .object({
-      AAD_APP_CLIENT_ID: z.string().optional(),
-      AAD_APP_CLIENT_SECRET: z.string().optional(),
-      AAD_APP_OAUTH_AUTHORITY_HOST: z.string().optional(),
-      AAD_APP_TENANT_ID: z.string().optional(),
-      TEAMSFX_ENV: z.string().min(1),
-      APP_VERSION: z.string().min(1),
-      BOT_ID: z.string().optional(),
-      BOT_PASSWORD: z.string().optional(),
-      BOT_APP_TYPE: z
-        .enum(["UserAssignedMsi", "SingleTenant", "MultiTenant"])
-        .optional(),
-      BOT_DOMAIN: z.string().optional(),
-      OPENAI_KEY: z.string().min(1),
-      OPENAI_ENDPOINT: z.string().url(),
-      OPENAI_MODEL: z.string().min(1), // For Azure OpenAI this is the name of the deployment to use.
-      OPENAI_EMBEDDING_MODEL: z.string().min(1), // For Azure OpenAI this is the name of the embeddings deployment to use.
-      STORAGE_ACCOUNT_NAME: z.string().min(1),
-      STORAGE_ACCOUNT_KEY: z.string().min(1),
-      OPENAI_TYPE: OpenAIType.optional(),
-      VECTRA_INDEX_PATH: z.string().min(1),
-      OPENAI_API_VERSION: z.string().optional(),
-      DEFAULT_PROMPT_NAME: z.string().min(1),
-      STORAGE_CONTAINER_NAME: z.string().min(1),
-      WEBDATA_SOURCE_NAME: z.string().min(1),
-      DOCUMENTDATA_SOURCE_NAME: z.string().min(1),
-      APPLICATIONINSIGHTS_INSTRUMENTATION_KEY: z.string().optional(),
-      CUSTOM_API_CLIENT_ID: z.string().optional(),
-      CUSTOM_API_CLIENT_SECRET: z.string().optional(),
-      MAX_TURNS: z.coerce.number().int().positive().default(10),
-      MAX_FILE_SIZE: z.coerce.number().int().positive(),
-      MAX_PAGES: z.coerce.number().int().positive(),
-    })
-    .superRefine(this.openAIRefiner)
-    .superRefine(this.botIDRefiner)
-    .superRefine(this.authRefiner);
+  private urlEndsWithHostname = (endpoint: string, hostname: string) => {
+    let url: URL;
+    try {
+      url = new URL(endpoint);
+    } catch (error) {
+      return false;
+    }
+    return url.hostname.endsWith(hostname);
+  };
 
-  public data: z.infer<typeof this.schema> = {} as z.infer<typeof this.schema>;
+  private valueStartsWithPlaceholder = (value: string) => {
+    return value.startsWith("<");
+  };
+
+  private schema = z.object({
+    AAD_APP_CLIENT_ID: z.string(),
+    AAD_APP_CLIENT_SECRET: z.string(),
+    AAD_APP_OAUTH_AUTHORITY_HOST: z.string(),
+    AAD_APP_TENANT_ID: z.string(),
+    TEAMSFX_ENV: z.string(),
+    APP_NAME: z.string(),
+    APP_VERSION: z.string(),
+    BOT_ID: z.string(),
+    BOT_PASSWORD: z.string(),
+    BOT_APP_TYPE: z
+      .enum(["UserAssignedMsi", "SingleTenant", "MultiTenant"])
+      .optional(),
+    BOT_DOMAIN: z.string(),
+    OPENAI_KEY: z.string(),
+    OPENAI_ENDPOINT: z.string(),
+    OPENAI_MODEL: z.string(), // For Azure OpenAI this is the name of the deployment to use.
+    OPENAI_EMBEDDING_MODEL: z.string(), // For Azure OpenAI this is the name of the embeddings deployment to use.
+    STORAGE_ACCOUNT_NAME: z.string(),
+    STORAGE_ACCOUNT_KEY: z.string(),
+    STORAGE_SAS_TOKEN: z.string(),
+    AZURE_SEARCH_ENDPOINT: z.string(),
+    AZURE_SEARCH_KEY: z.string(),
+    AZURE_SEARCH_INDEX_NAME: z.string(),
+    AZURE_SEARCH_SOURCE_NAME: z.string(),
+    OPENAI_TYPE: OpenAIType,
+    VECTRA_INDEX_PATH: z.string(),
+    OPENAI_API_VERSION: z.string().default("2024-02-01"),
+    DEFAULT_PROMPT_NAME: z.string(),
+    STORAGE_CONTAINER_NAME: z.string(),
+    WEBDATA_SOURCE_NAME: z.string(),
+    DOCUMENTDATA_SOURCE_NAME: z.string(),
+    APPLICATIONINSIGHTS_INSTRUMENTATION_KEY: z.string(),
+    MAX_TURNS: z.coerce.number().int().positive().default(10),
+    MAX_FILE_SIZE: z.coerce.number().int().positive().default(4096),
+    MAX_PAGES: z.coerce.number().int().positive().default(5),
+    ROUTE_UKNOWN_ACTION_TO_SEMANTIC: z.coerce.boolean().default(false),
+    CUSTOM_OPEN_API_BASE_URL: z.string(),
+    CUSTOM_API_CLIENT_ID: z.string(),
+    CUSTOM_API_CLIENT_SECRET: z.string(),
+  });
+
+  // public data: z.infer<typeof this.schema> = {} as z.infer<typeof this.schema>;
 }
 
 export { Env, OpenAIType };

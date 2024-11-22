@@ -20,6 +20,7 @@ import * as Errors from "../types/errors";
 import byodAnswerCard from "../adaptiveCards/templates/byodAnswer.json";
 import { ActionsHelper } from "../helpers/actionsHelper";
 import crypto from "crypto";
+import { EventNames } from "../types/eventNames";
 
 /**
  * Retrieves web content based on the provided URLs and user input.
@@ -36,6 +37,10 @@ export async function webRetrieval(
   planner: ActionPlanner<ApplicationTurnState>
 ): Promise<string> {
   const logger = logging.getLogger("bot.TeamsAI");
+  logger.trackEvent(
+    EventNames.Webretrieval,
+    Utils.GetUserProperties(context.activity)
+  );
   const env = container.resolve<Env>(Env);
 
   // Show typing indicator
@@ -63,6 +68,7 @@ export async function webRetrieval(
   // Add the web urls to the uploaded documents when they are not already in the list
   webSites.forEach((site) => {
     // Remove the anchor from the url as it refers to same site.
+    site.completeUrl = site.fileName;
     site.fileName = site.fileName.split("#")[0];
     if (
       !state.conversation.uploadedDocuments?.some(
@@ -94,7 +100,7 @@ export async function webRetrieval(
     new VectraDataSource({
       name: env.data.WEBDATA_SOURCE_NAME,
       embeddings: ActionsHelper.getEmbeddingsOptions(),
-      indexFolder: env.data.VECTRA_INDEX_PATH,
+      indexFolder: env.data.VECTRA_INDEX_PATH ?? "",
     })
   );
 
@@ -110,15 +116,11 @@ export async function webRetrieval(
     logger.error(
       `Failed adding content to the index: ${(error as Error).message}`
     );
-    if (error instanceof Errors.FileTooLargeError || Errors.TooManyPagesError) {
-      await context.sendActivity(`I'm sorry, I could not add the file to the index. 
-        It is too large. Document should not have more than ${env.data.MAX_PAGES} page(s) 
-        and ${env.data.MAX_FILE_SIZE} characters of text.`);
-    } else {
-      await context.sendActivity(
-        "I'm sorry, I could not add the content to the index."
-      );
-    }
+    await context.sendActivity(
+      `I'm sorry, I could not add the content to the index: ${
+        (error as Error).message
+      }`
+    );
     return AI.StopCommandName;
   }
 
@@ -143,7 +145,7 @@ export async function webRetrieval(
       }
       const card = Utils.renderAdaptiveCard(byodAnswerCard, {
         docType: "the website",
-        filename: doc.fileName,
+        filename: doc.completeUrl,
         answer: response,
       });
       await context.sendActivity({ attachments: [card] });

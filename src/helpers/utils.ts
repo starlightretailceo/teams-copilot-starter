@@ -6,19 +6,38 @@ import {
   CardAction,
   ActivityTypes,
   TurnContext,
+  Activity,
 } from "botbuilder";
-import EntityInfo from "../models/entityInfo";
-import CompanyInfo from "../models/companyInfo";
 import fetch from "node-fetch";
 import * as ACData from "adaptivecards-templating";
-import { Citation, PredictedCommand } from "@microsoft/teams-ai";
+import {
+  Citation,
+  ClientCitation,
+  PredictedCommand,
+} from "@microsoft/teams-ai";
 import { ApplicationTurnState } from "../models/aiTypes";
 import { container } from "tsyringe";
 import { Env } from "../env";
+import { TeamsAI } from "../bot/teamsAI";
+import { StringMap } from "../types";
 
 const TYPING_TIMER_DELAY = 1000;
 // Define a Utils class
 export class Utils {
+  /**
+   * Get the user properties from the activity.
+   * @param activity The activity to get the user properties from.
+   * @returns The user properties from the activity.
+   */
+  static GetUserProperties(activity: Activity): StringMap {
+    const userProperties: StringMap = {
+      userAadObjectId: activity.from.aadObjectId ?? "",
+      userName: activity.from.name ?? "",
+      tenantId: activity.conversation.tenantId ?? "",
+    };
+    return userProperties;
+  }
+
   static async MaxTurnsToRemember(): Promise<number> {
     const env = container.resolve(Env);
     return env.data.MAX_TURNS! * 2;
@@ -53,9 +72,17 @@ export class Utils {
     try {
       // Parse the content to check if it is an Action Plan JSON string
       const actionPlanJson = Utils.ensureJsonResponse(content);
-      if (actionPlanJson && actionPlanJson?.commands) {
-        return actionPlanJson?.commands.find((cmd: any) => cmd.type === "SAY")
-          ?.response;
+      if (actionPlanJson) {
+        if (Object.prototype.hasOwnProperty.call(actionPlanJson, "commands")) {
+          return actionPlanJson.commands.find((cmd: any) => cmd.type === "SAY")
+            ?.response;
+        }
+        if (Object.prototype.hasOwnProperty.call(actionPlanJson, "action")) {
+          return actionPlanJson.action.name === "SAY"
+            ? actionPlanJson.action.parameters?.text
+            : content;
+        }
+        return actionPlanJson.find((cmd: any) => cmd.type === "SAY")?.response;
       } else {
         return actionPlanJson?.content ?? content;
       }
@@ -105,18 +132,18 @@ export class Utils {
    * @returns A Messaging Extension Search Result Card
    */
   static createMessageExtensionSearchResultCard(
-    company: CompanyInfo
+    entity: any
   ): MessagingExtensionAttachment {
     // TODO: Use "Adaptive Card Hero Card" since Hero card is considered deprecated
-    const card = CardFactory.heroCard(company.name, [], [], {
-      text: company.address?.city_state,
-      subtitle: company.ticker,
+    const card = CardFactory.heroCard(entity.title, [], [], {
+      text: entity.text,
+      subtitle: entity.subtitle,
     }) as MessagingExtensionAttachment;
     // Set the tap action
-    card.preview = CardFactory.heroCard(company.name, [], [], {
-      tap: { type: "invoke", value: { entity: company } } as CardAction,
-      subtitle: company.ticker,
-      text: company.worldRegion,
+    card.preview = CardFactory.heroCard(entity.title, [], [], {
+      tap: { type: "invoke", value: { entity: entity } } as CardAction,
+      subtitle: entity.subtitle,
+      text: entity.text,
     });
     return card;
   }
@@ -150,26 +177,29 @@ export class Utils {
   }
 
   static createM365SearchResultAdaptiveCard(
-    company: CompanyInfo,
-    botId: string
+    entity: any,
+    botId: string,
+    cardTemplateFile: string
   ): Attachment {
-    const cardTemplate = Utils.getCompaniesListAdaptiveCardTemplate();
-    const handOffToBotUrl = `https://teams.microsoft.com/l/chat/0/0?users=28:${botId}&continuationToken=${company.id}`;
+    const cardTemplate = new ACData.Template(cardTemplateFile);
     return Utils.getAdaptiveCardWithData(cardTemplate, {
-      entity: company,
-      handOffToBotUrl: handOffToBotUrl,
+      entity: entity,
+      handOffToBotUrl: `${TeamsAI.HandoffUrl.replace(
+        "${continuation}",
+        botId
+      )}`,
     });
   }
 
-  static createM365SearchResultHeroCard(company: CompanyInfo): Attachment {
-    const card = CardFactory.heroCard(company?.name, [], [], {
+  static createM365SearchResultHeroCard(entity: any): Attachment {
+    const card = CardFactory.heroCard(entity?.title, [], [], {
       text: "",
     });
     card.content.tap = {
       type: "invoke",
       value: {
-        verb: "getCompanyInfo",
-        entity: company,
+        verb: "getSemanticInfo",
+        entity: entity,
       },
     };
     return card;
@@ -209,7 +239,7 @@ export class Utils {
    * @param expirationTime The expiration time in seconds.
    * @returns True if the entity has expired, false otherwise.
    */
-  static isEntityExpired(entity: EntityInfo, expirationTime: number): boolean {
+  static isEntityExpired(entity: any, expirationTime: number): boolean {
     const now = new Date();
     const lastUpdated: Date = entity.lastUpdated
       ? new Date(entity.lastUpdated)
@@ -233,25 +263,6 @@ export class Utils {
     return await response.text();
   }
 
-  /**
-   * Creates a list of attachments with detailed information for each company.
-   * @param companyNames List of company information.
-   * @returns List of messaging extension attachments.
-   */
-  static async createCompanyListAttachments(
-    companyNames: CompanyInfo[]
-  ): Promise<MessagingExtensionAttachment[]> {
-    const companyListAttachments: MessagingExtensionAttachment[] = [];
-
-    companyNames?.forEach((company: CompanyInfo) =>
-      companyListAttachments.push(
-        Utils.createMessageExtensionSearchResultCard(company)
-      )
-    );
-
-    return companyListAttachments;
-  }
-
   static findFirstCommonWords(input1: string, input2: string): string {
     // Split the inputs into arrays of words
     const words1 = input1.toLowerCase().match(/\b\w+\b/g) || [];
@@ -263,94 +274,6 @@ export class Utils {
     return commonWords?.length > 0
       ? commonWords[0].charAt(0).toUpperCase() + commonWords[0].slice(1)
       : "";
-  }
-
-  static getCompaniesListAdaptiveCardTemplate(): ACData.Template {
-    // Deliverable adaptive card template
-    const cardTemplate = new ACData.Template({
-      type: "AdaptiveCard",
-      body: [
-        {
-          type: "Container",
-          items: [
-            {
-              type: "ColumnSet",
-              columns: [
-                {
-                  type: "Column",
-                  width: "auto",
-                  items: [
-                    {
-                      type: "Image",
-                      url: "${entity.logoUrl}",
-                      size: "small",
-                    },
-                  ],
-                },
-                {
-                  type: "Column",
-                  width: "stretch",
-                  items: [
-                    {
-                      type: "TextBlock",
-                      text: "${entity.name}",
-                      weight: "Bolder",
-                      size: "Large",
-                      spacing: "None",
-                      wrap: true,
-                      style: "heading",
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-        {
-          type: "TextBlock",
-          text: "Stock Market: ${if(empty([entity.ticker]), 'N/A', [entity.ticker])}",
-          spacing: "None",
-          size: "Small",
-          wrap: true,
-          isSubtle: true,
-        },
-        {
-          type: "TextBlock",
-          text: "Location: ${entity.worldRegion}",
-          wrap: true,
-          style: "heading",
-        },
-        {
-          type: "TextBlock",
-          text: "Website: ${entity.website}",
-          wrap: true,
-          style: "heading",
-        },
-      ],
-      actions: [
-        {
-          type: "Action.Submit",
-          title: "View Details",
-          data: {
-            verb: "getCompanyInfo",
-            msteams: {
-              type: "task/fetch",
-            },
-            command: "getCompanyInfo",
-            entity: "${entity}",
-          },
-        },
-        {
-          type: "Action.OpenUrl",
-          title: "Handoff to Teams Copilot",
-          url: "${handOffToBotUrl}",
-        },
-      ],
-      $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-      version: "1.4",
-    });
-
-    return cardTemplate;
   }
 
   // Function to extract the text response from the Plan Action Command of type "SAY"
@@ -424,13 +347,21 @@ export class Utils {
    * @returns {string} The formatted content.
    */
   static formatCitationsResponse(content: string): string {
-    const regex = /\[doc(\d+)\]/g;
-    let match;
-    let index = 1;
-    while ((match = regex.exec(content)) !== null) {
-      content = content.replace(match[0], `[${index++}]`);
-    }
-    return content;
+    // Replace all occurrences of `[docX]` with `[X]`
+    const newContent = content.replace(/\[doc(\d+)\]/g, (match, p1) => {
+      return `[${p1}]`;
+    });
+
+    return newContent;
+  }
+
+  /**
+   * Checks if the content includes citations.
+   * @param {string} content The content to check for citations.
+   * @returns {boolean} True if citations are included, false otherwise.
+   */
+  static isCitationsIncluded(content: string): boolean {
+    return /\[doc\d+\]/.test(content);
   }
 
   /**
@@ -504,25 +435,67 @@ export class Utils {
   }
 
   /**
-   * Extracts citations from the content using a regular expression that uses bolded text to create citations.
+   * Extracts citations from the content using a regular expression that uses [doc#] to create citations references.
    * @param {string} content The content to extract citations from.
-   * @returns {Citation[]} The extracted citations.
+   * @param {Citation[]} contextCitations The citations to extract from the content.
+   * @returns {string, Citation[]} The formatted content and extracted citations in form of a tuple.
    */
-  public static extractCitations(content: string): Citation[] {
-    const citations: Citation[] = [];
-    // Create a regular expression to match markdown-style bolded text
-    const regex = /\*\*(.*?)\*\*/g;
+  public static formatCitations(
+    content: string,
+    contextCitations: Citation[]
+  ): [string, ClientCitation[] | undefined] {
+    const env = container.resolve(Env);
 
-    // Extract the citations from the content
-    const matches = Array.from(content.matchAll(regex)).map((m) => m[1]);
-    matches.forEach((match) => {
-      citations.push({
-        title: `Document ${match}`,
-        content: `Document ${match} content`,
-        url: `https://example.com/doc${match}`,
-        filepath: `doc${match}.pdf`,
-      });
+    // If the response from AI includes citations, they will be parsed and added to the response
+    const citations = contextCitations.map((citation, i) => {
+      return {
+        "@type": "Claim",
+        position: `${i + 1}`,
+        appearance: {
+          "@type": "DigitalDocument",
+          name: citation.title,
+          abstract: Utils.extractSnippet(citation.content, 500),
+          url: `${citation.url}?${env.data.STORAGE_SAS_TOKEN}`,
+          // url: `${TeamsAI.HandoffUrl.replace(
+          //   "${continuation}",
+          //   citation.url ?? citation.title ?? ""
+          // )}`,
+          usageInfo: {
+            type: "https://schema.org/Message",
+            "@type": "CreativeWork",
+            name: "Confidentiality Policy",
+            description:
+              "This document is confidential and should not be shared with unauthorized personnel.",
+          },
+        },
+      } as ClientCitation;
     });
-    return citations;
+
+    // If there are citations, modify the content so that the sources are numbered instead of [doc1]
+    const contentText = !citations
+      ? content
+      : Utils.formatCitationsResponse(content);
+
+    // If there are citations, filter out the citations unused in content.
+    const referencedCitations = citations
+      ? Utils.filterUnusedCitations(contentText, citations)
+      : undefined;
+
+    return [contentText, referencedCitations];
+  }
+
+  /**
+   * Filters out citations that are not used in the content.
+   * @param {string} contentText The content text to filter citations from.
+   * @param {ClientCitation[]} citations The citations to filter.
+   * @returns {ClientCitation[]} The filtered citations.
+   */
+  public static filterUnusedCitations(
+    contentText: string,
+    citations: ClientCitation[]
+  ): ClientCitation[] {
+    return citations.filter((citation) =>
+      contentText.includes(`[${citation.position}]`)
+    );
   }
 }

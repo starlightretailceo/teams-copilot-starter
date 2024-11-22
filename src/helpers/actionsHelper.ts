@@ -2,17 +2,11 @@ import "reflect-metadata";
 import { ActionPlanner, Citation, ClientCitation } from "@microsoft/teams-ai";
 import { AllowedFileTypes, ApplicationTurnState } from "../models/aiTypes";
 import { Attachment, TurnContext } from "botbuilder";
+import path from "path";
+import fs from "fs";
 import * as mime from "mime-types";
 import * as responses from "../resources/responses";
-import {
-  EntityInfoSkill,
-  GeneratePromptsSkill,
-  SimilarEntitiesSkill,
-} from "../skills";
 import { Utils } from "./utils";
-import CompanyInfo from "../models/companyInfo";
-import EntityInfo from "../models/entityInfo";
-import companyInfoCard from "../adaptiveCards/templates/companyInfo.json";
 import { FileAttachment } from "../models/fileAttachment";
 import { logging } from "../telemetry/loggerManager";
 import { Env } from "../env";
@@ -115,75 +109,6 @@ export class ActionsHelper {
     return true;
   }
 
-  /**
-   * Generates Adaptive Card for the provided company name
-   * @param context
-   * @param state
-   * @param data
-   * @returns
-   */
-  public static async generateAdaptiveCardForEntity(
-    context: TurnContext,
-    state: ApplicationTurnState,
-    entity: EntityInfo,
-    planner: ActionPlanner<ApplicationTurnState>
-  ): Promise<Attachment | undefined> {
-    try {
-      const entityName = entity.companyInfo.name;
-
-      // Generate prompts to follow up on the provided company name using OpenAI's GPT-3.5 API.
-      const generatePromptsSkill = new GeneratePromptsSkill(
-        context,
-        state,
-        planner
-      );
-
-      // Call Entity Info Skill to enrich the entity details with ESG scores
-      const entityDetailsSkill = new EntityInfoSkill(context, state, planner);
-
-      // Run parallel tasks
-      const [entityInfo, prompts] = await Promise.all([
-        entityDetailsSkill.run(entity),
-        generatePromptsSkill.run(entityName),
-      ]);
-
-      if (prompts && prompts.length > 0) {
-        // Prompts found
-        logger.info(`Prompts found for '${entityName}'`);
-        entityInfo.prompts = prompts;
-      } else {
-        // No prompts found
-        logger.info(`Prompts not found for '${entityName}'`);
-      }
-
-      // Find similar companies
-      const findSimiliarSkill = new SimilarEntitiesSkill(
-        context,
-        state,
-        planner
-      );
-      const otherCompanies = (await findSimiliarSkill.run(
-        entityName
-      )) as CompanyInfo[];
-
-      if (otherCompanies) {
-        otherCompanies.forEach((entity) => {
-          logger.info(`Entity found: '${entity.name}'`);
-        });
-        entityInfo.otherCompanies = otherCompanies;
-      }
-
-      // Send an adaptive card with the details
-      const card = Utils.renderAdaptiveCard(companyInfoCard, {
-        entity: entityInfo,
-      });
-      return card;
-    } catch (error: any) {
-      logger.error(`Error generating adaptive card for entity: ${error}`);
-      throw error;
-    }
-  }
-
   public static getEmbeddingsOptions() {
     const env = container.resolve<Env>(Env);
 
@@ -230,5 +155,90 @@ export class ActionsHelper {
     });
 
     return clientCitations;
+  }
+
+  /**
+   * Adds the Azure AI Search data source to the provided prompt template
+   * @param promptTemplate The name of the prompt template
+   * @param planner The action planner
+   * @returns The updated prompt template
+   */
+  public static async addAzureAISearchDataSource(
+    promptTemplate: string,
+    planner: ActionPlanner<ApplicationTurnState>
+  ): Promise<any> {
+    // Get the prompts from the planner
+    const prompts = planner.prompts;
+
+    // Get the environment settings
+    const env = container.resolve<Env>(Env);
+
+    // Get the prompt template for the provided prompt folder
+    const template = await prompts.getPrompt(promptTemplate);
+
+    // Read the SKPrompt from the file
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const skprompt = fs.readFileSync(
+      path.join(__dirname, "..", "prompts", promptTemplate, "skprompt.txt")
+    );
+
+    //
+    // Use the Azure AI Search data source for RAG over documents
+    //
+    const dataSources =
+      (template.config.completion as any)["data_sources"] ?? [];
+
+    if (dataSources.length > 0 && env.data) {
+      dataSources.forEach((dataSource: any) => {
+        if (dataSource.type === "azure_search" && dataSource.parameters) {
+          dataSource.parameters.endpoint = env.data.AZURE_SEARCH_ENDPOINT;
+          dataSource.parameters.authentication.key = env.data.AZURE_SEARCH_KEY;
+          dataSource.parameters.index_name = env.data.AZURE_SEARCH_INDEX_NAME;
+          dataSource.parameters.role_information = `${skprompt.toString(
+            "utf-8"
+          )}`;
+          if (dataSource.parameters.embedding_dependency) {
+            dataSource.parameters.embedding_dependency.deployment_name =
+              env.data.OPENAI_EMBEDDING_MODEL;
+          }
+        }
+      });
+    } else {
+      logger.info(
+        "No data sources found in the environment settings. Adding default settings for Azure AI Search data source."
+      );
+      dataSources.push({
+        type: "azure_search",
+        parameters: {
+          endpoint: env.data.AZURE_SEARCH_ENDPOINT,
+          index_name: env.data.AZURE_SEARCH_INDEX_NAME,
+          semantic_configuration: "default",
+          query_type: "vector_semantic_hybrid",
+          fields_mapping: {
+            content_fields_separator: "\n",
+            content_fields: ["content"],
+            filepath_field: "filepath",
+            title_field: "title",
+            url_field: "url",
+            vector_fields: ["contentVector"],
+          },
+          in_scope: false,
+          role_information: `${skprompt.toString("utf-8")}`,
+          filter: null,
+          strictness: 5,
+          top_n_documents: 10,
+          embedding_dependency: {
+            type: "deployment_name",
+            deployment_name: env.data.OPENAI_EMBEDDING_MODEL,
+          },
+          authentication: {
+            type: "api_key",
+            key: env.data.AZURE_SEARCH_KEY,
+          },
+        },
+      });
+    }
+
+    return dataSources;
   }
 }

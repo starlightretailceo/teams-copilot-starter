@@ -10,11 +10,11 @@ import { Env } from "../env";
 import { UserHelper } from "../helpers/userHelper";
 import { BYODSkill } from "../skills";
 import { VectraDataSource } from "../dataSources/vectraDataSource";
-import { FileAttachment } from "../models/fileAttachment";
 import * as responses from "../resources/responses";
 import * as Errors from "../types/errors";
 import byodAnswerCard from "../adaptiveCards/templates/byodAnswer.json";
 import crypto from "crypto";
+import { EventNames } from "../types/eventNames";
 
 /**
  * Initiates a chat session with a document.
@@ -31,6 +31,10 @@ export async function chatWithDocument(
   planner: ActionPlanner<ApplicationTurnState>
 ): Promise<string> {
   const logger = logging.getLogger("bot.TeamsAI");
+  logger.trackEvent(
+    EventNames.ChatWithDocument,
+    Utils.GetUserProperties(context.activity)
+  );
   const env = container.resolve<Env>(Env);
 
   // Show typing indicator
@@ -75,7 +79,7 @@ export async function chatWithDocument(
     new VectraDataSource({
       name: env.data.DOCUMENTDATA_SOURCE_NAME,
       embeddings: ActionsHelper.getEmbeddingsOptions(),
-      indexFolder: env.data.VECTRA_INDEX_PATH,
+      indexFolder: env.data.VECTRA_INDEX_PATH ?? "",
     })
   );
 

@@ -2,6 +2,7 @@
 env/.env.*.user
 env/.env.local
 env/.env.deploytest
+env/.env.dev
 .localConfigs
 appPackage/build
 
@@ -29,3 +30,7 @@ index/
 .teamsapptesttool.yml
 env/.env.testTool
 devTools/*
+.env.test
+
+# .nx cache
+.nx/

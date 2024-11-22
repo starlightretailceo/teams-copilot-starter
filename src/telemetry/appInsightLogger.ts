@@ -6,11 +6,13 @@ import { Env } from "../env";
 
 export class AppInsightLogger implements ILogger {
   private appInsightClient: AppInsightsService | undefined = undefined;
+  private readonly env: Env = container.resolve(Env);
 
-  private env: Env;
   constructor() {
-    this.env = container.resolve(Env);
-    if (this.env.data.APPLICATIONINSIGHTS_INSTRUMENTATION_KEY) {
+    if (
+      this.env.data &&
+      this.env.isProvided("APPLICATIONINSIGHTS_INSTRUMENTATION_KEY")
+    ) {
       this.appInsightClient = new AppInsightsService(
         this.env.data.APPLICATIONINSIGHTS_INSTRUMENTATION_KEY
       );
@@ -61,9 +63,9 @@ export class AppInsightLogger implements ILogger {
     }
   }
 
-  public trackDurationMetric(metricEntry: MetricEntry): void {
+  public trackMetric(metricEntry: MetricEntry): void {
     if (this.appInsightClient) {
-      this.appInsightClient.trackDurationMetric(metricEntry);
+      this.appInsightClient.trackMetric(metricEntry);
     }
   }
 }

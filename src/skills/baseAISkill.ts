@@ -1,7 +1,6 @@
 import { ActionPlanner, DataSource, PromptManager } from "@microsoft/teams-ai";
 import { TurnContext } from "botbuilder";
 import { ApplicationTurnState } from "../models/aiTypes";
-import EntityInfo from "../models/entityInfo";
 import { ISkill } from "./ISkill";
 import { handleWhen, retry } from "cockatiel";
 import { AxiosError } from "axios";
@@ -12,6 +11,7 @@ import { FileFetcher, LocalDocumentIndex, WebFetcher } from "vectra";
 import { VectraDataSource } from "../dataSources/vectraDataSource";
 import { logging } from "../telemetry/loggerManager";
 import { PDFFetcher } from "../fetchers/pdfFetcher";
+import { MetricNames } from "../types/metricNames";
 
 // Get an instance of the Logger singleton object
 const logger = logging.getLogger("bot.TeamsAI");
@@ -74,12 +74,12 @@ export abstract class BaseAISkill implements ISkill {
 
   /**
    * Runs the skill.
-   * @param {string | EntityInfo} input The input to send to OpenAI.
+   * @param {string | any} input The input to send to OpenAI.
    * @returns {Promise<any>} A promise that resolves to the skill's response.
    * @throws {Error} If the request to OpenAI was rate limited.
    * @abstract
    */
-  public abstract run(input: string | EntityInfo): Promise<any>;
+  public abstract run(input: string | any): Promise<any>;
 
   /**
    * Adds external content to the local index.
@@ -128,11 +128,16 @@ export abstract class BaseAISkill implements ISkill {
                 throw new Error("Vectra index is not set.");
               }
               logger.debug(`Indexing ${item.url} ...`);
+              const indexStartTime = Date.now();
               // Hash the uri to use as the document id to avoid collisions and have smaller uri in index
               const localDoc = await this.vectraIndex.upsertDocument(
                 hashFromUri,
                 text,
                 docType
+              );
+              logger.trackDurationMetric(
+                indexStartTime,
+                MetricNames.VectraIndexingTime
               );
               // Add the document to the conversation's documentIds
               this.state.conversation.documentIds.push(localDoc.id);
@@ -175,7 +180,6 @@ export abstract class BaseAISkill implements ISkill {
       }
     }
   }
-
   /**
    * Formats a timestamp into a date string.
    * @param {number} timestamp The timestamp to format.
